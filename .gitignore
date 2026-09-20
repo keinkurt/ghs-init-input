@@ -2,3 +2,4 @@
 .vscode
 .local
 include/config.h
+out

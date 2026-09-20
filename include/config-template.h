@@ -53,3 +53,7 @@
 */
 #define WIFI_SSID ""
 #define WIFI_PSWD ""
+//#define WIFI_SSID2 ""
+//#define WIFI_PSWD2 ""
+//#define WIFI_SSID3 ""
+//#define WIFI_PSWD4 ""

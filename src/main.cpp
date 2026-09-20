@@ -45,7 +45,7 @@ char currentMode = 'A';
 bool longRest = false;
 bool lastLongRest = false;
 
-// Mode B: Hit points, Expernience, Loot
+// Mode B: Hit points, Experience, Loot
 int bModeValue = 0;
 int hpValue = 0;
 int xpValue = 0;
@@ -407,17 +407,26 @@ void modeC_onSubmit() {
 // ============================================================
 
 uint8_t postIdentity(uint8_t value) {
-  JsonDocument identityCommand;
-  identityCommand["id"] = "character.identity";
-  identityCommand["parameters"][0] = playerNumber;
-  identityCommand["parameters"][1] = value - 1;
-  return postCommand(identityCommand);
+  JsonDocument command;
+  if (value > 0 && value < 7) {
+    command["id"] = "element.toggle";
+    command["parameters"][0] = value;
+  } else {
+    command["id"] = "character.identity";
+    command["parameters"][0] = playerNumber;
+    if (value == 0) {
+      command["parameters"][1] = 3;
+    } else {
+      command["parameters"][1] = value - 7;
+    }
+  }
+  return postCommand(command);
 }
 
 void modeD_onClear() {}
 void modeD_onDigit(uint8_t digit) {
   if (postIdentity(digit) != RESULT_OK) {
-    Serial.println("Post initiative failed");
+    Serial.println("Post identity change failed");
     ledInterval = ERROR_INTERVAL;
     return;
   }

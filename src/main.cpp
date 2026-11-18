@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
-#include <HTTPClient.h>
 #include <Keypad.h>
 #include <WiFi.h>
 #include <WiFiMulti.h>
@@ -13,6 +12,10 @@
 
 #define RESULT_OK 0
 #define RESULT_ERROR 1
+
+#ifndef RESPONSE_TIMEOUT
+#define RESPONSE_TIMEOUT 5000
+#endif
 
 #ifndef COLUMNS
 #define COLUMNS 3
@@ -43,7 +46,6 @@ char currentMode = 'A';
 
 // Mode A: Initiative
 bool longRest = false;
-bool lastLongRest = false;
 
 // Mode B: Hit points, Experience, Loot
 int bModeValue = 0;
@@ -58,7 +60,6 @@ bool conditionSubmitted = false;
 
 // Persistent values
 int value = -1;
-int lastValue = -1;
 int playerNumber = 0;
 int resetCount = 0;
 
@@ -81,7 +82,7 @@ WiFiClient client;
 // Mode A: Initiative
 // ============================================================
 
-uint8_t setInitiative() {
+void setInitiative() {
   longRest = false;
   if (value < 0) {
     value = 0;
@@ -91,12 +92,6 @@ uint8_t setInitiative() {
     value = 99;
     longRest = true;
   }
-
-  if (value == lastValue && longRest == lastLongRest) {
-    return RESULT_ERROR;
-  }
-
-  return RESULT_OK;
 }
 
 uint8_t postCommand(JsonDocument command) {
@@ -133,6 +128,12 @@ uint8_t postCommand(JsonDocument command) {
     client.print(commandJson.substring(cIndex, cIndex + 1000));
   }
 
+  unsigned long responseStart = millis();
+  while (client.connected() && !client.available() &&
+         millis() - responseStart < RESPONSE_TIMEOUT) {
+    delay(10);
+  }
+
   char status[32] = {0};
   int bytesRead = client.readBytesUntil('\r', status, sizeof(status) - 1);
 
@@ -140,6 +141,10 @@ uint8_t postCommand(JsonDocument command) {
       !isdigit(status[11])) {
     Serial.print(F("Invalid HTTP response (bytes read: "));
     Serial.print(bytesRead);
+    Serial.print(F(", after "));
+    Serial.print(millis() - responseStart);
+    Serial.print(F("ms, connected: "));
+    Serial.print(client.connected());
     Serial.print(F("): "));
     Serial.println(status);
     client.stop();
@@ -192,50 +197,17 @@ void modeA_onDigit(uint8_t digit) {
 }
 
 void modeA_onSubmit() {
-  if (setInitiative() != RESULT_OK) {
-    Serial.println("Initiative unchanged or invalid");
-    ledInterval = ERROR_INTERVAL;
-    resetMillis = millis() + 3000;
-    value = -1;
-    longRest = false;
-    lastValue = value;
-    lastLongRest = longRest;
-
-#ifdef EEPROM_SIZE
-    EEPROM.write(EEPROM_ADDRESS_LAST_VALUE, lastValue);
-    EEPROM.write(EEPROM_ADDRESS_LAST_LONG_REST, lastLongRest);
-    EEPROM.commit();
-#endif
-    return;
-  }
+  setInitiative();
 
   if (postInitiative() != RESULT_OK) {
     Serial.println("Post initiative failed");
     ledInterval = ERROR_INTERVAL;
-    value = -1;
-    longRest = false;
-    lastValue = value;
-    lastLongRest = longRest;
-
-#ifdef EEPROM_SIZE
-    EEPROM.write(EEPROM_ADDRESS_LAST_VALUE, lastValue);
-    EEPROM.write(EEPROM_ADDRESS_LAST_LONG_REST, lastLongRest);
-    EEPROM.commit();
-#endif
-    return;
+  } else {
+    ledInterval = NORMAL_INTERVAL;
   }
 
-  lastValue = value;
-  lastLongRest = longRest;
   value = -1;
   longRest = false;
-  ledInterval = NORMAL_INTERVAL;
-
-#ifdef EEPROM_SIZE
-  EEPROM.write(EEPROM_ADDRESS_LAST_VALUE, lastValue);
-  EEPROM.write(EEPROM_ADDRESS_LAST_LONG_REST, lastLongRest);
-  EEPROM.commit();
-#endif
 }
 
 // ============================================================
@@ -320,9 +292,9 @@ void modeB_onDigit(uint8_t digit) {
       break;
     case 7:
       bModeValue = 3;
-      lootValue--; 
+      lootValue--;
       hpValue = 0;
-      xpValue = 0; 
+      xpValue = 0;
       break;
     case 8:
       bModeValue = 3;
@@ -353,8 +325,7 @@ void modeB_onSubmit() {
     Serial.println("Post XP failed");
     ledInterval = ERROR_INTERVAL;
     return;
-  } else if (bModeValue == 3 && lootValue != 0 &&
-             postLoot() != RESULT_OK) {
+  } else if (bModeValue == 3 && lootValue != 0 && postLoot() != RESULT_OK) {
     Serial.println("Post Loot failed");
     ledInterval = ERROR_INTERVAL;
     return;
@@ -363,6 +334,7 @@ void modeB_onSubmit() {
     ledInterval = ERROR_INTERVAL;
     return;
   }
+  ledInterval = NORMAL_INTERVAL;
   modeB_onClear();
 }
 
@@ -394,11 +366,16 @@ void modeC_onDigit(uint8_t digit) {
   conditionSubmitted = false;
 }
 void modeC_onSubmit() {
+  if (value < 0) {
+    Serial.println("No condition selected");
+    return;
+  }
   if (postCondition() != RESULT_OK) {
     Serial.println("Post Condition failed");
     ledInterval = ERROR_INTERVAL;
     return;
   }
+  ledInterval = NORMAL_INTERVAL;
   conditionSubmitted = true;
 }
 
@@ -417,7 +394,7 @@ uint8_t postIdentity(uint8_t value) {
     if (value == 0) {
       command["parameters"][1] = 3;
     } else {
-      command["parameters"][1] = value - 7;
+      command["parameters"][1] = digit == 0 ? 4 : value - 7;
     }
   }
   return postCommand(command);
@@ -426,10 +403,11 @@ uint8_t postIdentity(uint8_t value) {
 void modeD_onClear() {}
 void modeD_onDigit(uint8_t digit) {
   if (postIdentity(digit) != RESULT_OK) {
-    Serial.println("Post identity change failed");
+    Serial.println("Post identity failed");
     ledInterval = ERROR_INTERVAL;
     return;
   }
+  ledInterval = NORMAL_INTERVAL;
 }
 void modeD_onSubmit() {}
 
@@ -488,6 +466,15 @@ void onSubmit() {
   }
 }
 
+void printBSSID(const uint8_t* bssid) {
+  for (int i = 0; i < 6; i++) {
+    if (i > 0) {
+      Serial.print(":");
+    }
+    Serial.print(bssid[i], HEX);  // Print each byte in HEX format
+  }
+}
+
 void blinkLED() {
   if (ledInterval > 0 && millis() - lastMillis > ledInterval) {
     lastMillis = millis();
@@ -510,6 +497,39 @@ void blinkLED() {
     if (playerNumber < 1) {
       ledInterval = PLAYER_INTERVAL;
     }
+  }
+}
+
+void wifiWait(bool multi) {
+  int counter = 0;
+  while (!multi && WiFi.status() != WL_CONNECTED ||
+         multi && wifiMulti.run() != WL_CONNECTED) {
+    digitalWrite(LED_PIN, LOW);
+    delay(500);
+    digitalWrite(LED_PIN, HIGH);
+    Serial.print(".");
+    counter += 1;
+    if (counter % 20 == 0) {
+      Serial.println();
+    }
+  }
+}
+
+void wifiConnected(bool multi, long startTime) {
+  if (!multi && WiFi.status() == WL_CONNECTED ||
+      multi && wifiMulti.run() == WL_CONNECTED) {
+    Serial.print("\nWi-Fi connected after ");
+    Serial.print((millis() - startTime) / 1000);
+    Serial.println("s");
+    Serial.print("\"");
+    Serial.print(WiFi.SSID());
+    Serial.print("\" BSSID: ");
+    printBSSID(WiFi.BSSID());
+    Serial.print("\" IP address: ");
+    Serial.println(WiFi.localIP());
+    Serial.println();
+  } else {
+    Serial.println("Wi-Fi not connected!");
   }
 }
 
@@ -539,30 +559,46 @@ void setup() {
   wifiMulti.addAP(WIFI_SSID3, WIFI_PSWD3);
 #endif
 
+  long startTime = millis();
   Serial.println("\nConnecting to Wifi");
-  int counter = 0;
-  while (wifiMulti.run() != WL_CONNECTED && counter < 120) {
-    digitalWrite(LED_PIN, LOW);
-    delay(500);
-    digitalWrite(LED_PIN, HIGH);
-    Serial.print(".");
-    counter += 1;
-    if (counter % 20 == 0) {
-      Serial.println();
-    }
-  }
+  wifiWait(true);
   digitalWrite(LED_PIN, LOW);
 
   if (wifiMulti.run() == WL_CONNECTED) {
-    Serial.println("\nWi-Fi connected");
-    Serial.print("\"");
-    Serial.print(WiFi.SSID());
-    Serial.print("\" IP address: ");
-    Serial.println(WiFi.localIP());
-    Serial.println();
-  } else {
-    Serial.println("\nCould not connect to Wi-Fi");
-    ledState = WIFI_INTERVAL;
+    wifiConnected(true, startTime);
+
+#ifdef WIFI_BSSID
+    if (WiFi.SSID() == WIFI_SSID) {
+      uint8_t targetBSSID[] = WIFI_BSSID;
+      if (memcmp(WiFi.BSSID(), targetBSSID, 6) != 0) {
+        Serial.println(
+            "Connected to wrong BSSID for WIFI_SSID. Reconnecting...");
+        WiFi.disconnect();
+        delay(500);  // Wait for disconnect to complete
+        WiFi.begin(WIFI_SSID, WIFI_PSWD, 0, targetBSSID);
+        wifiWait(false);
+        wifiConnected(false, startTime);
+      } else {
+        Serial.println("Correct BSSID for WIFI_SSID connected!");
+      }
+    }
+#endif
+#ifdef WIFI_BSSID2
+    if (WiFi.SSID() == WIFI_SSID2) {
+      uint8_t targetBSSID[] = WIFI_BSSID2;
+      if (memcmp(WiFi.BSSID(), targetBSSID, 6) != 0) {
+        Serial.println(
+            "Connected to wrong BSSID for WIFI_SSID2. Reconnecting...");
+        WiFi.disconnect();
+        delay(500);  // Wait for disconnect to complete
+        WiFi.begin(WIFI_SSID2, WIFI_PSWD2, 0, targetBSSID);
+        wifiWait(false);
+        wifiConnected(false, startTime);
+      } else {
+        Serial.println("Correct BSSID for WIFI_SSID2 connected!");
+      }
+    }
+#endif
   }
 
 #if defined(TLS)
@@ -570,7 +606,8 @@ void setup() {
                          // important and this will prevent issues with local
                          // SSL server
 #endif
-  client.setTimeout(5000);
+  client.setTimeout(RESPONSE_TIMEOUT / 1000);  // seconds on ESP32 clients
+  client.Stream::setTimeout(RESPONSE_TIMEOUT);  // ms, used by readBytesUntil
 
 #ifdef EEPROM_SIZE
   EEPROM.begin(EEPROM_SIZE);
@@ -587,30 +624,14 @@ void setup() {
     ledInterval = PLAYER_INFO_INTERVAL;
     resetMillis = millis() + playerNumber * PLAYER_INFO_INTERVAL * 2;
   }
-
-  lastValue = EEPROM.read(EEPROM_ADDRESS_LAST_VALUE);
-  if (lastValue > 99) {
-    lastValue = -1;
-    EEPROM.write(EEPROM_ADDRESS_LAST_VALUE, lastValue);
-    EEPROM.commit();
-  }
-  Serial.print("Read lastValue: ");
-  Serial.println(lastValue);
-
-  lastLongRest = EEPROM.read(EEPROM_ADDRESS_LAST_LONG_REST);
-  if (lastLongRest != 0 && lastLongRest != 1) {
-    lastLongRest = false;
-    EEPROM.write(EEPROM_ADDRESS_LAST_LONG_REST, lastLongRest);
-    EEPROM.commit();
-  }
-  Serial.print("Read lastLongRest: ");
-  Serial.println(lastLongRest);
 #endif
 }
 
 void loop() {
   if (wifiMulti.run() != WL_CONNECTED) {
     ledInterval = WIFI_INTERVAL;
+  } else if (ledInterval == WIFI_INTERVAL) {
+    ledInterval = playerNumber > 0 ? NORMAL_INTERVAL : PLAYER_INTERVAL;
   }
 
   char key = keypad.getKey();
@@ -634,14 +655,10 @@ void loop() {
         Serial.println("Reset player");
         playerNumber = 0;
         resetCount = 0;
-        lastValue = -1;
-        lastLongRest = false;
         ledInterval = PLAYER_INTERVAL;
 
 #ifdef EEPROM_SIZE
         EEPROM.write(EEPROM_ADDRESS_PLAYER_NUMBER, playerNumber);
-        EEPROM.write(EEPROM_ADDRESS_LAST_VALUE, lastValue);
-        EEPROM.write(EEPROM_ADDRESS_LAST_LONG_REST, lastLongRest);
         EEPROM.commit();
 #endif
       }
